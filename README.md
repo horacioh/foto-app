@@ -44,7 +44,9 @@ bun test                    # TS unit tests
 
 bun run rust:test           # cargo test --workspace
 bun run rust:lint           # clippy + fmt check
-bun run storage-node        # run a storage node on :4100 (data in ./data)
+bun run storage-node        # run a storage node on 127.0.0.1:4100 (data in ./data)
+                            # grants aren't signature-checked yet; non-loopback
+                            # binds need --allow-unsigned-grants
 bun run server              # run the coordinator on :4000
 
 bun run wasm:build          # build the web core (required before running the app on web)

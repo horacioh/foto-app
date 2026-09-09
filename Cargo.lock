@@ -854,6 +854,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "futures-util",
  "http-body-util",
  "photos-core",
  "photos-protocol",
@@ -866,6 +867,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

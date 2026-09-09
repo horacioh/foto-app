@@ -92,6 +92,10 @@ impl std::fmt::Debug for Ciphertext {
 /// resume per chunk and downloads decrypt progressively.
 pub const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Upper bound on chunks per blob (≈ 256 GiB at [`CHUNK_SIZE`]). Bounds the
+/// per-blob directory size and manifest scans on storage nodes.
+pub const MAX_CHUNKS_PER_BLOB: u32 = 65_536;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemberRole {

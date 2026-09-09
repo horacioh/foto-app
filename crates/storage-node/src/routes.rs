@@ -7,7 +7,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use photos_protocol::{BlobId, BlobManifest, UploadGrant};
+use photos_protocol::{BlobId, BlobManifest, UploadGrant, MAX_CHUNKS_PER_BLOB};
 use serde::Deserialize;
 use tower_http::trace::TraceLayer;
 
@@ -43,9 +43,9 @@ impl IntoResponse for ApiError {
             ApiError::Backend(BackendError::NotFound) => {
                 (StatusCode::NOT_FOUND, "not found".to_string())
             }
-            ApiError::Backend(BackendError::Incomplete) => {
-                (StatusCode::CONFLICT, "incomplete".to_string())
-            }
+            ApiError::Backend(
+                e @ (BackendError::Incomplete | BackendError::Sealed | BackendError::TotalMismatch),
+            ) => (StatusCode::CONFLICT, e.to_string()),
             ApiError::Backend(BackendError::HashMismatch) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "content hash mismatch".to_string())
             }
@@ -57,9 +57,10 @@ impl IntoResponse for ApiError {
             ApiError::BadBlobId => {
                 (StatusCode::BAD_REQUEST, "blob id must be 64 hex chars".to_string())
             }
-            ApiError::BadTotal => {
-                (StatusCode::BAD_REQUEST, "total must be >= 1 and > index".to_string())
-            }
+            ApiError::BadTotal => (
+                StatusCode::BAD_REQUEST,
+                format!("total must be in 1..={MAX_CHUNKS_PER_BLOB} and > index"),
+            ),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
@@ -126,7 +127,7 @@ async fn put_chunk(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id)?;
-    if q.total == 0 || index >= q.total {
+    if q.total == 0 || q.total > MAX_CHUNKS_PER_BLOB || index >= q.total {
         return Err(ApiError::BadTotal);
     }
     let grant = parse_grant(&headers)?;
@@ -140,8 +141,9 @@ async fn get_blob(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let bytes = state.backend.get(parse_id(&id)?).await?;
-    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+    let chunks = state.backend.get(parse_id(&id)?).await?;
+    let body = axum::body::Body::from_stream(chunks);
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body).into_response())
 }
 
 async fn delete_blob(
@@ -158,7 +160,7 @@ async fn delete_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{backend::LocalDisk, grant::AllowAll};
+    use crate::{backend::LocalDisk, grant::Unsigned};
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
@@ -169,7 +171,7 @@ mod tests {
     async fn app() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalDisk::open(dir.path()).await.unwrap();
-        let state = AppState { backend: Arc::new(backend), grants: Arc::new(AllowAll) };
+        let state = AppState { backend: Arc::new(backend), grants: Arc::new(Unsigned::default()) };
         (router(state), dir)
     }
 
@@ -283,6 +285,34 @@ mod tests {
         assert_eq!(put(&app, &id, 0, 1, b"x", false).await.status(), StatusCode::FORBIDDEN);
         assert_eq!(put(&app, "nothex", 0, 1, b"x", true).await.status(), StatusCode::BAD_REQUEST);
         assert_eq!(put(&app, &id, 1, 1, b"x", true).await.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn completed_blobs_are_immutable() {
+        let (app, _dir) = app().await;
+        let chunks: [&[u8]; 2] = [b"aaa", b"bbb"];
+        let id = photos_core::crypto::blob_id(chunks).to_hex();
+        assert_eq!(put(&app, &id, 0, 2, chunks[0], true).await.status(), StatusCode::ACCEPTED);
+        // A resumed upload cannot change the chunk count.
+        assert_eq!(put(&app, &id, 1, 3, chunks[1], true).await.status(), StatusCode::CONFLICT);
+        assert_eq!(put(&app, &id, 1, 2, chunks[1], true).await.status(), StatusCode::CREATED);
+        // Nothing is written once the blob is sealed, even matching content.
+        assert_eq!(put(&app, &id, 0, 2, b"zzz", true).await.status(), StatusCode::CONFLICT);
+        assert_eq!(put(&app, &id, 0, 2, chunks[0], true).await.status(), StatusCode::CONFLICT);
+        let res = app
+            .oneshot(Request::builder().uri(format!("/blobs/{id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"aaabbb");
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_chunk_counts() {
+        let (app, _dir) = app().await;
+        let id = photos_core::crypto::blob_id([b"x"]).to_hex();
+        let res = put(&app, &id, 0, MAX_CHUNKS_PER_BLOB + 1, b"x", true).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
