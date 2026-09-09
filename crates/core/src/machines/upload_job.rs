@@ -7,15 +7,22 @@
 //!   RequestingGrant ─GrantIssued─▶ Uploading(i, attempt) ─ChunkUploaded─▶ … ─▶
 //!   Committing ─Committed─▶ Done
 //!
+//! Hashing ─Duplicate(of)─▶ Deduplicated            (byte-identical asset already in library)
 //! Uploading ─ChunkFailed(transient)─▶ Uploading(i, attempt+1) after ScheduleRetry
 //! Uploading ─ChunkFailed(permanent)─▶ Failed
 //! any non-terminal ─Cancel─▶ Failed(Cancelled)
 //! ```
 //!
+//! Dedup happens at the `Hashing` step: the runtime hashes the plaintext,
+//! looks the [`ContentHash`] up in the local index and answers with either
+//! `Hashed` (new content) or `Duplicate` (skip encryption and upload, link the
+//! local file to the existing asset). See `docs/ARCHITECTURE.md` §5.
+//!
 //! Everything slow (hashing, sealing, HTTP) is an effect executed by the
 //! runtime; the machine only tracks progress, so it is fully unit tested
 //! without touching a file or a socket.
 
+use crate::asset::ContentHash;
 use crate::machine::{backoff_ms, StateMachine, Step};
 use photos_protocol::{AlbumId, AssetId, BlobId, StorageNodeId, UploadGrant};
 
@@ -43,7 +50,7 @@ pub enum State {
     },
     Encrypting {
         info: JobInfo,
-        content_hash: BlobId,
+        content_hash: ContentHash,
         total_chunks: u32,
         next_chunk: u32,
     },
@@ -69,6 +76,12 @@ pub enum State {
         info: JobInfo,
         blob_id: BlobId,
     },
+    /// Terminal: the library already holds a byte-identical asset; nothing was
+    /// encrypted or uploaded.
+    Deduplicated {
+        info: JobInfo,
+        existing: AssetId,
+    },
     Failed {
         info: JobInfo,
         reason: FailReason,
@@ -93,8 +106,12 @@ pub enum FailReason {
 pub enum Event {
     Start,
     Hashed {
-        content_hash: BlobId,
+        content_hash: ContentHash,
         total_chunks: u32,
+    },
+    /// The plaintext hash matched an asset already in the library.
+    Duplicate {
+        existing: AssetId,
     },
     HashFailed(String),
     ChunkSealed {
@@ -153,6 +170,14 @@ pub enum Effect {
     Cleanup {
         asset_id: AssetId,
     },
+    /// Record `local_uri` as another local copy of `existing` (so the timeline
+    /// shows one asset and the evictor knows about both files) and add
+    /// `existing` to the target album if it is not there yet.
+    LinkDuplicate {
+        existing: AssetId,
+        album_id: AlbumId,
+        local_uri: String,
+    },
 }
 
 impl State {
@@ -165,6 +190,7 @@ impl State {
             | State::Uploading { info, .. }
             | State::Committing { info, .. }
             | State::Done { info, .. }
+            | State::Deduplicated { info, .. }
             | State::Failed { info, .. } => info,
         }
     }
@@ -185,7 +211,7 @@ impl StateMachine for UploadJob {
     type Effect = Effect;
 
     fn is_terminal(state: &State) -> bool {
-        matches!(state, State::Done { .. } | State::Failed { .. })
+        matches!(state, State::Done { .. } | State::Deduplicated { .. } | State::Failed { .. })
     }
 
     fn transition(state: State, event: Event) -> Step<State, Effect> {
@@ -211,6 +237,14 @@ impl StateMachine for UploadJob {
                     S::Encrypting { info, content_hash, total_chunks, next_chunk: 0 },
                     vec![Effect::SealChunk { index: 0, last: total_chunks == 1 }],
                 )
+            }
+            (S::Hashing { info }, Event::Duplicate { existing }) => {
+                let effect = Effect::LinkDuplicate {
+                    existing,
+                    album_id: info.album_id,
+                    local_uri: info.local_uri.clone(),
+                };
+                Step::to(S::Deduplicated { info, existing }, vec![effect])
             }
             (s @ S::Hashing { .. }, Event::HashFailed(msg)) => s.fail(FailReason::HashFailed(msg)),
 
@@ -369,7 +403,7 @@ mod tests {
     #[test]
     fn happy_path_three_chunks() {
         let info = info();
-        let hash = BlobId([1; 32]);
+        let hash = ContentHash([1; 32]);
         let blob = BlobId([2; 32]);
         let g = grant(&info);
 
@@ -484,7 +518,8 @@ mod tests {
             vec![
                 Event::ChunkUploaded { index: 0 },
                 Event::ChunkSealed { index: 7 },
-                Event::Hashed { content_hash: BlobId([9; 32]), total_chunks: 1 },
+                Event::Hashed { content_hash: ContentHash([9; 32]), total_chunks: 1 },
+                Event::Duplicate { existing: AssetId::new() },
             ],
         );
         assert_eq!(state, start);
@@ -501,6 +536,33 @@ mod tests {
         let done = State::Done { info: info.clone(), blob_id: BlobId([2; 32]) };
         let (state, effects) = apply(done.clone(), vec![Event::Cancel]);
         assert_eq!(state, done);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn duplicate_short_circuits_before_any_encryption_or_upload() {
+        let info = info();
+        let existing = AssetId::new();
+        let (state, effects) = apply(
+            State::Discovered { info: info.clone() },
+            vec![Event::Start, Event::Duplicate { existing }],
+        );
+        assert_eq!(state, State::Deduplicated { info: info.clone(), existing });
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HashFile { local_uri: "ph://ABC".into() },
+                Effect::LinkDuplicate {
+                    existing,
+                    album_id: info.album_id,
+                    local_uri: "ph://ABC".into()
+                },
+            ]
+        );
+        assert!(UploadJob::is_terminal(&state));
+
+        let (after, effects) = apply(state.clone(), vec![Event::Cancel]);
+        assert_eq!(after, state);
         assert!(effects.is_empty());
     }
 

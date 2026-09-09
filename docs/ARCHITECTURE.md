@@ -237,11 +237,12 @@ UploadGrant    id, album_id, storage_node_id, grantee_account_id, max_bytes, exp
 Client-side (SQLite inside `photos-core`), plaintext after decryption:
 
 ```
-Asset          id, k_asset, content_hash, kind (photo|video|live), captured_at, width, height,
-               duration, camera, geo, local_uri?, original_blob, preview_blob, thumb_blob,
-               metadata_blob, is_own, eviction_state
-AssetMeta      asset_id, exif(json), caption, tags[], faces[] (embedding, box, person_id?),
-               clip_embedding (vec)
+Asset          id, k_asset, content_hash (blake3 of plaintext, unique), kind (photo|video|live),
+               captured_at, width, height, duration, camera, geo, original_blob, preview_blob,
+               thumb_blob, metadata_blob, is_own, eviction_state
+LocalCopy      asset_id, device_id, local_uri            -- one asset may exist as several files
+AssetMeta      asset_id, perceptual_hash (u64), exif(json), caption, tags[],
+               faces[] (embedding, box, person_id?), clip_embedding (vec)
 Album          id, name, kind, rule(json)?, ak, owner, my_role, parent_album_id?, sort
 AlbumAsset     album_id, asset_id, wrapped_key, added_by, added_at
 Person         id, name, representative_face, embedding_centroid
@@ -268,6 +269,40 @@ ChildAlbumLinked { album_id }                          -- nesting (R1)
 Conflict rules are simple because the data is simple: sets are add-wins,
 scalar fields are LWW by hybrid logical clock, blobs are immutable and
 content-addressed. No CRDT library needed.
+
+### Deduplication
+
+E2EE decides where dedup can happen: **on the device, never on the server.**
+`BlobId` is BLAKE3 of the *ciphertext* under a fresh `K_asset`, so the same
+photo uploaded twice produces two unrelated blobs and the coordinator has
+nothing to match on. That is deliberate (see below). Types live in
+`photos-core::asset`.
+
+| Level | Key | When | Action |
+|-------|-----|------|--------|
+| Exact | `ContentHash` = BLAKE3(plaintext original) | `UploadJob::Hashing`, before any encryption | Runtime looks the hash up in the local index. Hit → `Event::Duplicate` → terminal `Deduplicated`; `Effect::LinkDuplicate` records the file as another `LocalCopy` of the existing asset and adds that asset to the target album. Nothing is encrypted or uploaded. |
+| Near | `PerceptualHash` (64-bit dHash/pHash; poster frame for video) | ML indexing pass, same place faces/CLIP run | Stored in the encrypted `AssetMeta`. Pairs within Hamming distance ≤ 10 (plus a duration check for video) feed the built-in `Duplicates` smart album. Suggest-only: the user picks what to keep; we never merge or delete automatically. |
+| Shared | `asset_id` / `ContentHash` | Backfilling an album feed | Shared assets are references, not copies (§6). If a member already owns a byte-identical asset, the client links the two records locally so the timeline shows one item. |
+
+Why this covers the real cases: the bulk of duplicates come from importing
+the same photo via several paths (camera roll + iCloud export + Google
+Takeout — phase 6 importers) — exact matches. Bursts, edits and messenger
+re-encodes are near matches and inherently need a human decision.
+
+What we intentionally do **not** do:
+
+- **Cross-account server-side dedup.** The only way to get it under E2EE is
+  convergent encryption (`K_asset` derived from the content hash), which
+  leaks "does *anyone* on this server have this file" to the operator and
+  enables confirmation-of-file attacks. Storage is cheaper than that
+  trade-off. Hosted-tier costs are handled by quotas, not dedup.
+- **Chunk-level dedup across assets.** Same reason: chunks are encrypted
+  under per-asset keys, so identical plaintext chunks never share a
+  ciphertext.
+
+The `ContentHash` is also what makes re-scans idempotent: reinstalling the
+app or adding a device re-hashes the camera roll and finds every asset
+already in the library without re-uploading.
 
 ---
 
@@ -324,12 +359,13 @@ Supervisor
 ├── UploadQueue
 │   └── UploadJob[asset]    Discovered → Hashing → Encrypting(chunk) → RequestingGrant
 │                           → Uploading(chunk, attempt) → Committing → Done | Failed(reason)
+│                           Hashing → Deduplicated   (content hash already in library)
 ├── DownloadQueue
 │   └── DownloadJob[blob]   Queued → Fetching(chunk) → Decrypting → Done
 ├── StorageEvictor          Idle → Evaluating → Evicting(batch) → Idle   (optimize storage)
 ├── SmartAlbumMaterializer[album]  Idle → Evaluating(rule) → Diffing → Publishing → Idle
 ├── KeyRotator[album]       Idle → Rotating → ReWrapping(progress) → Publishing → Idle
-├── MlIndexer               Idle → Faces(batch) → Clip(batch) → Clustering → Idle
+├── MlIndexer               Idle → PHash(batch) → Faces(batch) → Clip(batch) → Clustering → Idle
 └── Importer[source]        Idle → Enumerating → Ingesting(item) → Done  (iCloud/Takeout)
 ```
 
@@ -428,7 +464,7 @@ Estimates are Devin sessions, assuming PR-per-phase and review in between.
 | 2 | Albums, sharing (sealed AK), roles, upload grants (owner pays), nested albums, key rotation on member removal | 2 |
 | 3 | Storage node hardening: S3 backend, pairing flow, Tailscale address selection, relay; optimize-storage evictor | 1–2 |
 | 4 | Video (chunked streaming decrypt, thumbnails), Live Photos | 1 |
-| 5 | On-device ML: faces + people, CLIP search; smart albums + materializer | 2 |
+| 5 | On-device ML: faces + people, CLIP search, perceptual hashes; smart albums + materializer, built-in `Duplicates` album | 2 |
 | 6 | Importers (iCloud export folder, Google Takeout), export/backup | 1 |
 | 7 | Hosted: billing module, quotas, ops (metrics, backups), app store builds | 1–2 |
 

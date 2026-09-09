@@ -7,6 +7,7 @@
 //! (via `photos-core-wasm`), the coordinator and the storage node.
 
 pub mod actor;
+pub mod asset;
 pub mod crypto;
 pub mod machine;
 pub mod machines;
