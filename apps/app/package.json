@@ -1,0 +1,39 @@
+{
+  "name": "@photos/app",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "main": "./src/index.ts",
+  "scripts": {
+    "start": "expo start --clear",
+    "ios": "expo start --ios --clear",
+    "android": "expo start --android --clear",
+    "web": "expo start --web --clear",
+    "prebuild": "expo prebuild --clean",
+    "export:web": "expo export --platform web",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@expo/metro-runtime": "~55.0.12",
+    "@photos/core": "workspace:*",
+    "@photos/core-native": "workspace:*",
+    "@photos/core-wasm": "workspace:*",
+    "@photos/ui": "workspace:*",
+    "expo": "~55.0.31",
+    "expo-build-properties": "~55.0.18",
+    "expo-status-bar": "~55.0.6",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.10",
+    "react-native-web": "^0.21.2",
+    "react-strict-dom": "0.0.55"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.27.3",
+    "@photos/config": "workspace:*",
+    "@types/react": "~19.2.0",
+    "autoprefixer": "^10.4.21",
+    "babel-preset-expo": "~55.0.25",
+    "typescript": "^5.9.0"
+  }
+}

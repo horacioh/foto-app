@@ -1,0 +1,26 @@
+{
+  "name": "@photos/core-wasm",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Web CoreBackend backed by crates/core-wasm (wasm-bindgen)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "imports": {
+    "#pkg": "./pkg/photos_core_wasm.js"
+  },
+  "scripts": {
+    "build": "wasm-pack build ../../crates/core-wasm --target web --out-dir ../../packages/core-wasm/pkg --out-name photos_core_wasm && bun run copy:app",
+    "copy:app": "mkdir -p ../../apps/app/public/core && cp pkg/photos_core_wasm_bg.wasm ../../apps/app/public/core/",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@photos/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@photos/config": "workspace:*",
+    "typescript": "^5.9.0"
+  }
+}

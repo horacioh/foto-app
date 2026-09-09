@@ -1,0 +1,26 @@
+{
+  "name": "photos",
+  "private": true,
+  "license": "Apache-2.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "packageManager": "bun@1.4.2",
+  "scripts": {
+    "typecheck": "bun run --filter '*' typecheck",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "bun test",
+    "app": "bun run --filter @photos/app start",
+    "wasm:build": "bun run --filter @photos/core-wasm build",
+    "rust:test": "cargo test --workspace",
+    "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check",
+    "server": "cargo run -p photos-server",
+    "storage-node": "cargo run -p photos-storage-node"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@photos/core",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "TypeScript facade over the Rust photos-core (native via UniFFI, web via WASM)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./memory": "./src/memory.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@photos/config": "workspace:*",
+    "bun-types": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}

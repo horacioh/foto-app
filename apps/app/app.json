@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "Photos",
+    "slug": "photos",
+    "scheme": "photos",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "backgroundColor": "#0b0b0d",
+    "ios": {
+      "bundleIdentifier": "app.photos.client",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Photos backs up your camera roll to your own encrypted library.",
+        "UIBackgroundModes": ["fetch", "processing"]
+      }
+    },
+    "android": {
+      "package": "app.photos.client",
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0b0d"
+      },
+      "permissions": ["READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO"]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "ios": { "deploymentTarget": "15.1" },
+          "android": { "minSdkVersion": 24 }
+        }
+      ]
+    ]
+  }
+}

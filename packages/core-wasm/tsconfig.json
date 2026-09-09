@@ -1,0 +1,4 @@
+{
+  "extends": "@photos/config/tsconfig.base.json",
+  "include": ["src", "types"]
+}

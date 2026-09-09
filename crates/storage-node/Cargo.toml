@@ -1,0 +1,33 @@
+[package]
+name = "photos-storage-node"
+description = "Encrypted blob store: single binary, pluggable backends, runs anywhere (incl. over Tailscale)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "photos-storage-node"
+path = "src/main.rs"
+
+[dependencies]
+photos-protocol = { workspace = true }
+photos-core = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "signal", "net"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }
