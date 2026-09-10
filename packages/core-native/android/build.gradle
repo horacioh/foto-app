@@ -1,0 +1,35 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'app.photos.core'
+version = '0.0.1'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace 'app.photos.core'
+  defaultConfig {
+    versionCode 1
+    versionName '0.0.1'
+  }
+  sourceSets {
+    main {
+      // UniFFI-generated Kotlin lives in src/main/java/uniffi (gitignored).
+      java.srcDirs += 'src/main/java'
+      // libphotos_core_ffi.so per ABI, produced by scripts/build-rust.sh via cargo-ndk.
+      jniLibs.srcDirs += 'src/main/jniLibs'
+    }
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // Required by UniFFI-generated Kotlin.
+  implementation 'net.java.dev.jna:jna:5.14.0@aar'
+}

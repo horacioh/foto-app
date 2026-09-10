@@ -1,0 +1,34 @@
+[package]
+name = "photos-server"
+description = "Coordinator: accounts, keys, album feeds, storage node registry, grants, billing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "photos-server"
+path = "src/main.rs"
+
+[features]
+default = []
+# Stripe-backed plans and quotas for the hosted product. Self-hosters never build this.
+billing = []
+
+[dependencies]
+photos-protocol = { workspace = true }
+photos-core = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }

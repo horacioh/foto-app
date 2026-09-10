@@ -1,0 +1,39 @@
+# JS
+node_modules/
+dist/
+build/
+.expo/
+.expo-shared/
+*.tsbuildinfo
+.bun-cache/
+
+# Rust
+target/
+crates/core-wasm/pkg/
+packages/core-wasm/pkg/
+
+# Native
+apps/app/ios/
+apps/app/android/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Env / local
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+data/
+
+# Generated native bindings (packages/core-native/scripts/build-rust.sh)
+packages/core-native/ios/generated/
+packages/core-native/android/src/main/java/uniffi/
+packages/core-native/android/src/main/jniLibs/
+
+# Built by `bun run wasm:build`
+apps/app/public/core/

@@ -1,0 +1,9 @@
+{
+  "extends": "@photos/config/tsconfig.base.json",
+  "compilerOptions": {
+    "types": [],
+    "customConditions": ["react-native"],
+    "moduleSuffixes": [".ios", ".android", ".native", ""]
+  },
+  "include": ["src"]
+}

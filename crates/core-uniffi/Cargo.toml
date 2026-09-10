@@ -1,0 +1,26 @@
+[package]
+name = "photos-core-uniffi"
+description = "UniFFI surface of photos-core for iOS (Swift) and Android (Kotlin)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "photos_core_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+photos-core = { workspace = true }
+uniffi = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]

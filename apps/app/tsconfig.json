@@ -1,0 +1,17 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "customConditions": ["react-native"],
+    "moduleResolution": "bundler",
+    "moduleSuffixes": [".ios", ".android", ".native", ""],
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["src", "*.d.ts"]
+}

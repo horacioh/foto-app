@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["PhotosCoreModule"]
+  },
+  "android": {
+    "modules": ["app.photos.core.PhotosCoreModule"]
+  }
+}

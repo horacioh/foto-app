@@ -1,0 +1,37 @@
+{
+  "name": "@photos/core-native",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Expo Module exposing crates/core-uniffi (Swift/Kotlin) as a CoreBackend",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "expo-module.config.json"
+  ],
+  "scripts": {
+    "build:rust": "./scripts/build-rust.sh",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@photos/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@photos/config": "workspace:*",
+    "expo": "~55.0.31",
+    "expo-modules-core": "~55.0.26",
+    "react-native": "0.83.10",
+    "typescript": "^5.9.0"
+  }
+}
