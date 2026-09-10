@@ -52,9 +52,51 @@ semantic search, importers (iCloud export, Google Takeout). Sequenced in §11.
 - Server-side ML of any kind (impossible under E2EE by design).
 - Collaborative photo *editing*; edits are stored as non-destructive
   adjustment metadata, applied on the client.
+- RAW developing, LUT/log colour pipelines, pro retouching. The
+  rendition model (§5) leaves room for a "reprocess RAW → new display
+  rendition" plugin later, but the product is a family library, not a
+  darkroom.
+- DAM features (watermarks, themes, public SEO galleries, role hierarchies).
 - Federation between independent coordinators. One account lives on one
   coordinator. (Storage nodes are already federated.)
 - Replacing iCloud Drive / generic file sync.
+
+### Design principles
+
+Distilled from what people leave Immich / Ente / PhotoPrism / Apple Photos
+over (see §1.1). Every later section should be checkable against these.
+
+| # | Principle | What it means concretely |
+|---|-----------|--------------------------|
+| P1 | **Set-and-forget for 10+ years.** | Single static binaries, SQLite by default, no Redis/queues/microservices. Append-only feeds + immutable content-addressed blobs mean upgrades never rewrite user data; migrations only touch the small coordinator index and are forward-only with an automatic pre-migration snapshot. Data dir is plain files you can `rsync`. |
+| P2 | **Backup must actually finish.** | Every upload is a persisted state machine (§7) that survives app kills and resumes per 4 MiB chunk. iOS background execution is treated as the make-or-break feature of phase 1, not polish. The app always shows a truthful *Backup status* screen ("12,304 of 12,310 safe; 6 waiting for Wi-Fi"). |
+| P3 | **Family-first.** | Shared content is a first-class citizen: members hold `K_asset`, so faces, search and smart albums work on shared photos exactly like on your own. Family library, collect links, notifications, per-item contributor permissions (§5.2). |
+| P4 | **Metadata integrity.** | Deterministic capture-date resolution with a recorded source/confidence, timezone kept explicit, RAW+JPEG / Live Photo pairs stay pairs, sidecars written back on export (§5.3). Import never silently drops a file: every item ends `Imported`, `Deduplicated` or `Failed(reason)` and failures are listed. |
+| P5 | **Never the only copy without saying so.** | Optimize-storage may evict a local original only when the blob is confirmed on ≥ 2 independent locations, or the user explicitly acknowledged "this node is my only copy". Integrity scrub reports bit-rot before you find out the hard way. |
+| P6 | **Light on the device.** | ML runs incrementally, on thumbnails/previews, when charging and on unmetered network by default. Timeline is virtualized; nothing loads an album into RAM. Target: 100k assets on a 5-year-old phone. |
+| P7 | **Fast, keyboard-first on web/desktop.** | Prefetch window (±2 full previews decrypted in memory, next 100 thumbnails), instant 100% zoom, no-modifier shortcuts, `/` command palette, culling mode (§9.1). Touch gets the same actions as a toolbar. |
+| P8 | **Your files stay files.** | Export at any time, from any client or the node CLI, as originals + sidecars in a plain folder layout. Adopt an existing folder via `photos-node import --watch`. |
+
+### 1.1 Landscape (condensed)
+
+Surveyed: Immich, Nextcloud Photos + Memories, Piwigo, Ente, PhotoPrism, plus
+aggregated user complaints about them and Ben Vallack's DIY Apple Photos
+replacement (culling-focused, LAN web UI).
+
+- Nobody combines E2EE + shareable smart albums + owner-pays + BYO storage;
+  nested albums are rare (Piwigo/Lychee only). Those are our selling points.
+- Recurring complaints we design against: fragile updates (P1), mobile
+  backup that stalls (P2), "great for one power user, painful for a
+  household" (P3), scrambled timelines after iCloud/Takeout imports (P4),
+  "don't use it as your only copy" (P5), phones heating up during indexing
+  (P6), no serious culling tool anywhere (P7).
+- Table-stakes features we adopt because the feed model makes them cheap:
+  share/collect links, trash/archive/favorites/hidden, memories/rewind,
+  selective backup, metadata editing, comments/reactions, stacks, map with
+  on-device geocoding, incremental export, integrity scrub, family plans.
+- Deliberately skipped: anything server-side (ML, transcoding, cross-user
+  dedup, indexing plaintext folders in place), DAM features, RAW/LUT
+  colour work (see non-goals).
 
 ---
 
@@ -68,16 +110,18 @@ semantic search, importers (iCloud export, Google Takeout). Sequenced in §11.
 │  └──────────┬─────────────┘  │  + WS  │  - storage node registry     │
 │             │ events/state   │        │  - upload grants, quotas     │
 │  ┌──────────▼─────────────┐  │        │  - billing (hosted only)     │
-│  │ photos-core (Rust)     │  │        │  Postgres                    │
-│  │ actors + state machines│  │        └──────────────┬───────────────┘
-│  │ crypto, sync, index    │  │                       │ registration,
-│  └──────────┬─────────────┘  │                       │ health, grants
-│  UniFFI (native) / WASM (web)│                       ▼
-└──────────────┬───────────────┘        ┌──────────────────────────────┐
-               │ encrypted blobs        │  Storage node (Rust, single  │
-               │ (direct, or via        │  binary)                     │
-               │  tailnet / relay)      │  - PUT/GET encrypted blobs   │
-               └───────────────────────▶│  - backends: disk, S3, R2    │
+│  │ photos-core (Rust)     │  │        │  - share links, notifications│
+│  │ actors + state machines│  │        │  SQLite (default) / Postgres │
+│  │ crypto, sync, index    │  │        └──────────────┬───────────────┘
+│  └──────────┬─────────────┘  │                       │ registration,
+│  UniFFI (native) / WASM (web)│                       │ health, grants
+└──────────────┬───────────────┘                       ▼
+               │ encrypted blobs        ┌──────────────────────────────┐
+               │ (direct, or via        │  Storage node (Rust, single  │
+               │  tailnet / relay)      │  binary; + headless device)  │
+               └───────────────────────▶│  - PUT/GET encrypted blobs   │
+                                        │  - backends: disk, S3, R2    │
+                                        │  - scrub, import --watch     │
                                         │  - runs anywhere incl. over  │
                                         │    Tailscale                 │
                                         └──────────────────────────────┘
@@ -94,7 +138,10 @@ Three deployable things:
    content or metadata.
 3. **Storage node** (`crates/storage-node`): dumb, content-addressed encrypted
    blob store with pluggable backends. Registers with a coordinator, accepts
-   uploads authorized by coordinator-signed grants.
+   uploads authorized by coordinator-signed grants. Optionally runs as a
+   **headless device** for one account (`import --watch`, smart-album
+   materialization, ML indexing) so self-hosters have an always-on client
+   that is not a phone (§8).
 
 The hosted product is a coordinator plus a fleet of storage nodes we run.
 Self-hosting is the same coordinator plus one or more nodes the user runs.
@@ -125,8 +172,10 @@ work (delegated to platform codecs on mobile, `libvips`/`ffmpeg` on the
 importer CLI). Rust is at or above Go on all of these and gives us the
 `Send + Sync` guarantees that make the actor runtime safe.
 
-Server framework: `axum` + `tokio` + `sqlx` (Postgres). Storage node:
-`axum` with a `Backend` trait (`LocalDisk`, `S3`).
+Server framework: `axum` + `tokio` + `sqlx`. Coordinator database is
+**SQLite by default** (one binary, one data directory, `rsync`-able backup;
+P1) with Postgres as a compile-time feature for the hosted tier. Storage
+node: `axum` with a `Backend` trait (`LocalDisk`, `S3`).
 
 ### TypeScript / React Native / StyleX
 
@@ -217,11 +266,12 @@ albums".
 
 ## 5. Data model
 
-Server-side (Postgres, coordinator). Fields marked `enc` are opaque
-ciphertext to the server.
+Server-side (coordinator; SQLite or Postgres). Fields marked `enc` are
+opaque ciphertext to the server.
 
 ```
-Account        id, email_hash, created_at, plan, quota_bytes, used_bytes
+Account        id, email_hash, created_at, plan, plan_group_id?, quota_bytes, used_bytes
+PlanGroup      id, owner_account_id, quota_bytes                -- family plan: pooled quota, not data
 KeyBundle      account_id, kek_params, mk_wrapped_by_kek(enc), mk_wrapped_by_recovery(enc),
                identity_pub, signing_pub, identity_priv(enc), signing_priv(enc)
 Device         id, account_id, name, signing_pub, last_seen, revoked_at
@@ -230,23 +280,33 @@ StorageNode    id, owner_account_id, name, endpoint_urls[], tailnet_url?, capaci
 Album          id, owner_account_id, created_at, storage_node_id, kind (manual|smart|builtin)
 AlbumMember    album_id, account_id, role, ak_sealed(enc), added_by_device, seq
 Feed           album_id, seq (monotonic), device_id, signature, payload(enc)   -- append-only
-Blob           id (blake3 of ciphertext), size, storage_node_id, album_id (for quota), ref_count
+Blob           id (blake3 of ciphertext), size, storage_node_id, album_id (for quota), ref_count,
+               last_scrubbed_at, replica_node_ids[]
 UploadGrant    id, album_id, storage_node_id, grantee_account_id, max_bytes, expires_at, sig
+ShareLink      id, album_id, role (view|collect), expires_at?, pw_hash?, max_uploads?, revoked_at
+Notification   account_id, seq, kind, album_id, payload(enc)     -- "3 new photos in Summer 2026"
 ```
 
 Client-side (SQLite inside `photos-core`), plaintext after decryption:
 
 ```
 Asset          id, k_asset, content_hash (blake3 of plaintext, unique), kind (photo|video|live),
-               captured_at, width, height, duration, camera, geo, original_blob, preview_blob,
-               thumb_blob, metadata_blob, is_own, eviction_state
+               captured_at, captured_at_source (exif|sidecar|filename|mtime|user), tz_offset?,
+               width, height, duration, camera, geo, original_blob, preview_blob,
+               thumb_blob, metadata_blob, display_rendition (original|rendition_id),
+               is_own, eviction_state, favorite, archived, hidden, trashed_at?
+Rendition      id, asset_id, kind (edit|raw_develop|proxy), ops(json), blob      -- original is never touched
 LocalCopy      asset_id, device_id, local_uri            -- one asset may exist as several files
-AssetMeta      asset_id, perceptual_hash (u64), exif(json), caption, tags[],
-               faces[] (embedding, box, person_id?), clip_embedding (vec)
-Album          id, name, kind, rule(json)?, ak, owner, my_role, parent_album_id?, sort
+AssetMeta      asset_id, perceptual_hash (u64), exif(json), caption, tags[], ocr_text?,
+               faces[] (embedding, box, person_id?), clip_embedding (vec), place (on-device geocode)
+Stack          id, primary_asset_id, member_asset_ids[], kind (burst|raw_jpeg|edit|user)
+Album          id, name, kind, rule(json)?, ak, owner, my_role, parent_album_id?, sort,
+               auto_upload_rule(json)?                  -- family library: "my camera roll goes here"
 AlbumAsset     album_id, asset_id, wrapped_key, added_by, added_at
-Person         id, name, representative_face, embedding_centroid
+Comment        album_id, asset_id, author, text, hlc;   Reaction  album_id, asset_id, author, emoji, hlc
+Person         id, name, representative_face, embedding_centroid, confirmed_face_ids[]
 FeedCursor     album_id, last_seq
+ImportLog      source, item_uri, outcome (imported|deduplicated|failed(reason)), asset_id?
 Job tables     upload_jobs, download_jobs, evict_jobs (persisted state-machine state)
 ```
 
@@ -256,14 +316,20 @@ single sync mechanism. Feed payloads are encrypted with `AK` and are one of:
 
 ```
 AssetAdded { asset_id, wrapped_key, blob refs, captured_at }
-AssetRemoved { asset_id }
+AssetRemoved { asset_id }                             -- contributors: only their own; owner: any
+Trashed { asset_id, at } / Restored { asset_id }      -- 30-day trash, then AssetRemoved + blob GC
+Flagged { asset_id, favorite|archived|hidden, bool, hlc }
 MetaPatched { asset_id, field, value, hlc }          -- last-writer-wins per field
+RenditionAdded { asset_id, rendition, wrapped_key } / DisplayRenditionSet { asset_id, rendition_id?, hlc }
+StackLinked { primary, members[] } / StackUnlinked { stack_id }
+Comment { asset_id, text, hlc } / Reaction { asset_id, emoji, hlc }
 AlbumRenamed { name, hlc }
 RuleChanged { rule, hlc }                             -- smart albums
 MemberAdded { account_id, role, ak_sealed }           -- owner-signed
 MemberRemoved { account_id }                          -- owner-signed, triggers rotation
 KeyRotated { new_ak_sealed_for_each_member }
 ChildAlbumLinked { album_id }                          -- nesting (R1)
+ShareLinkCreated { link_id, role, ak_wrapped_for_link } / ShareLinkRevoked { link_id }
 ```
 
 Conflict rules are simple because the data is simple: sets are add-wins,
@@ -304,6 +370,63 @@ The `ContentHash` is also what makes re-scans idempotent: reinstalling the
 app or adding a device re-hashes the camera roll and finds every asset
 already in the library without re-uploading.
 
+### 5.2 Sharing surface (P3)
+
+Everything below is an album plus feed entries; no new sync mechanism.
+
+| Feature | Design |
+|---------|--------|
+| **Family library** | A shared album whose members set `auto_upload_rule` on their own devices ("everything from my camera roll", or "only when at home"). `LibraryScanner` fans new assets out to `builtin:library` *and* the family album in one `UploadJob`; the blob lands on the owner's storage (R3). This is the iCloud Shared Library use case without merging accounts. |
+| **Contributor permissions** | Roles: `owner`, `contributor`, `viewer`. A contributor's `AssetRemoved` is accepted by the coordinator only for assets whose `AssetAdded` was signed by the same account; the owner can remove anything. Removing from a shared album never deletes the contributor's own copy (they keep the `builtin:library` membership). Write access can therefore never destroy someone else's originals. |
+| **Notifications** | Coordinator appends a `Notification` row per member when a feed grows (kind + album id only; payload encrypted under `AK`). Delivered via APNs/FCM/Web Push with no plaintext; the client decrypts and renders "Ana added 12 photos to *Summer*". |
+| **Single-photo share** | A one-asset album, created and shared (or share-linked) in one gesture. Same primitives, no special case. |
+| **Share links** | `ShareLink` row on the coordinator + owner-signed `ShareLinkCreated` entry. The album key is wrapped under a random link key that lives only in the URL fragment (`#k=…`), never sent to the server. Web client decrypts in-browser. Options: password (Argon2id-derived second wrap), expiry, `view` or `collect` (link carries an upload grant so guests upload into the owner's quota, capped by `max_uploads`). |
+| **Comments / reactions** | `Comment` / `Reaction` feed entries encrypted under `AK`; members' devices index them locally. |
+| **Family plan** | `PlanGroup` pools quota across accounts (hosted tier); data is still shared via albums, never by merging libraries. |
+
+### 5.3 Metadata integrity, formats and edits (P4)
+
+**Capture date** is resolved once at import and the *source* is recorded so
+it can be re-resolved or bulk-fixed later:
+
+```
+1. EXIF DateTimeOriginal (+ OffsetTimeOriginal / GPS-derived tz if present)
+2. Sidecar: Google Takeout .json photoTakenTime, iCloud export CSV, XMP
+3. Filename pattern (IMG_20240712_183012, PXL_…, WhatsApp IMG-…-WA…)
+4. Filesystem mtime           → captured_at_source = mtime, shown as "date uncertain"
+```
+
+`captured_at` is stored as UTC plus an explicit `tz_offset` when known;
+timeline grouping uses local time when the offset is known and device time
+otherwise. A bulk "Fix dates" tool (shift by N hours, take from sidecar,
+set from filename) writes `MetaPatched` entries; originals are never
+rewritten.
+
+**Format pairing.** RAW+JPEG, HEIC+MOV (Live Photo), Android motion photos
+and original+edited pairs from iCloud exports are detected at import (same
+basename / `ContentIdentifier` / Takeout `-edited` suffix) and become one
+`Asset` with the display rendition pointing at the JPEG/HEIC, or a `Stack`
+when they are distinct captures. They are shown as one item and exported as
+the original files.
+
+**Edits are renditions.** The original blob is immutable. An edit (crop,
+rotate, adjustments; later: RAW develop, LUT proxy for video) produces a
+`Rendition` with its `ops` and, when the client chooses to materialize it,
+its own encrypted blob. `display_rendition` selects what the timeline
+shows; switching back is a one-field `MetaPatched`. This is Ben Vallack's
+"proxy file" model and Apple's non-destructive editing in one mechanism.
+
+**Export** writes originals under their original filenames in
+`YYYY/YYYY-MM/` folders plus an XMP sidecar (resolved date, tz, GPS,
+caption, tags, people names, album membership) and a `manifest.json` per
+run; runs are incremental (by feed `seq`). Available from the web app
+(File System Access API), mobile (share sheet / SAF) and
+`photos-node export`.
+
+**Import outcomes.** Each enumerated item ends in exactly one of
+`Imported | Deduplicated | Failed(reason)` in `ImportLog`; the UI shows the
+failures list with a retry button. Silent skips are a bug by definition.
+
 ---
 
 ## 6. Sync protocol
@@ -319,9 +442,16 @@ already in the library without re-uploading.
 - Because feeds are per album, sharing an album with someone is just
   granting them the feed + the sealed `AK`; their client backfills from
   `seq=0`.
-- Optimize-storage: local originals are evicted only when the asset's
-  original blob is confirmed on a storage node with the album's required
-  replication factor (default 1 for BYO, 2 for hosted).
+- Optimize-storage (P5): local originals are evicted only when the asset's
+  original blob is confirmed on storage nodes with the album's required
+  replication factor. Default is **2 independent locations** (two nodes,
+  or a node with a `Mirror` backend to S3, or hosted which replicates
+  internally). With a single BYO node the evictor stays disabled until the
+  user explicitly acknowledges "this node is my only copy" in settings;
+  the Backup status screen shows the replication state per node.
+- Trash: `Trashed` keeps blobs for 30 days (configurable per album owner),
+  then the owner's device emits `AssetRemoved` and the coordinator
+  decrements `Blob.ref_count`; nodes GC unreferenced blobs.
 
 ---
 
@@ -365,9 +495,18 @@ Supervisor
 ├── StorageEvictor          Idle → Evaluating → Evicting(batch) → Idle   (optimize storage)
 ├── SmartAlbumMaterializer[album]  Idle → Evaluating(rule) → Diffing → Publishing → Idle
 ├── KeyRotator[album]       Idle → Rotating → ReWrapping(progress) → Publishing → Idle
-├── MlIndexer               Idle → PHash(batch) → Faces(batch) → Clip(batch) → Clustering → Idle
-└── Importer[source]        Idle → Enumerating → Ingesting(item) → Done  (iCloud/Takeout)
+├── MlIndexer               Idle → Waiting(conditions) → PHash(batch) → Faces(batch) → Clip(batch)
+│                           → Ocr(batch) → Clustering → Idle
+│                           conditions (P6): charging AND unmetered network AND app idle, or user
+│                           override; batches of ~50 thumbnails/previews, never originals
+├── Importer[source]        Idle → Enumerating → Ingesting(item) → Done  (iCloud/Takeout/folder)
+├── TrashSweeper            Idle → Expiring(batch) → Idle                 (30-day trash)
+└── Notifier                Idle → Decrypting(push) → Idle
 ```
+
+`BackupStatus` is not an actor but a derived view over the job tables
+(counts per `UploadJob` state, evictor replication state, last successful
+sync per album) — the truthful "are my photos safe?" screen (P2).
 
 Server-side (coordinator and storage node) reuse the same runtime for:
 
@@ -376,6 +515,8 @@ GrantIssuer                 per upload grant lifecycle
 NodeHealth[node]            Unknown → Healthy → Degraded → Offline
 Replication[blob]           Single → Replicating(target) → Replicated
 BlobGc                      RefCounted → Tombstoned → Deleted
+Scrub[node]                 Idle → Verifying(cursor) → Reporting → Idle   (periodic hash re-check, P5)
+HeadlessDevice              the client supervisor above, embedded in the storage node (§8)
 ```
 
 The scaffold in this repo implements the trait, the runtime skeleton and a
@@ -415,6 +556,18 @@ executable on a NAS / Raspberry Pi / Mac mini) with:
 - Album → node placement is chosen by the owner per album (default: the
   owner's default node). Hosted storage is the same binary with `S3` backend
   pointed at our bucket.
+- **Integrity scrub** (P5): the node periodically re-hashes stored chunks
+  and reports `last_scrubbed_at` / mismatches to the coordinator; the app
+  surfaces "3 blobs failed verification on *closet-nas*" and re-replicates
+  from another location when one exists.
+- **Headless device mode** (P1/P6/P8): `photos-node --account <pairing>`
+  embeds the client supervisor (§7) with no UI. It can
+  `import --watch <dir>` (encrypt + ingest an existing folder — the E2EE
+  answer to Immich "external libraries"; the source folder is read-only to
+  us and stays untouched), materialize smart albums for members while phones are
+  asleep (resolves risk §12.3), run ML indexing on a box with a fan instead
+  of a phone, and `export` incrementally. A single binary either stores
+  blobs, acts as a device, or both.
 
 ---
 
@@ -430,11 +583,46 @@ executable on a NAS / Raspberry Pi / Mac mini) with:
 | Thumbnails | `PHImageManager` | `ImageDecoder` | `createImageBitmap` |
 
 Models: face detection + ArcFace-style embeddings; CLIP ViT-B/32 (or
-MobileCLIP) for semantic search. Embeddings are stored in the encrypted
+MobileCLIP) for semantic search; OCR via Apple Vision / ML Kit /
+`tesseract-wasm` (stretch). Embeddings are stored in the encrypted
 metadata blob so indexing happens once per asset, on whichever member device
 gets there first, and every other member benefits. Person *names* are
 per-account (a face cluster you name is your label; sharing labels is a
-future opt-in).
+future opt-in). Face clustering is **feedback-driven**: every confirmed or
+corrected face becomes part of the person's `confirmed_face_ids` and
+re-centres the embedding centroid, so accuracy improves with use; clustering
+thresholds are exposed under an advanced setting for people who want to
+tune them.
+
+### 9.1 Client UX principles (P7)
+
+These come from the culling-first DIY tool in §1.1 and are cheap because
+the local index and thumbnails are always on device.
+
+- **Prefetch window.** Selecting an item decrypts the ±2 neighbouring
+  previews into memory and warms the next ~100 thumbnails; the viewer keeps
+  prev/next mounted so arrow keys switch with zero visible delay and 100%
+  zoom is instant (previews are generated at upload time, §4).
+- **Keyboard-first on web/desktop, no modifiers**: `←/→` move, `Space`
+  cycles grid → fit → 100%, `P` pick, `X` reject, `F` favourite, `/`
+  command palette, `O` toggle face boxes, `Esc` back. Touch clients expose
+  the same actions as a toolbar.
+- **Command palette** (`/`): fuzzy actions plus "make album from…" with
+  string matching over dates, people, camera, lens, place — it is the
+  interactive face of smart-album rules (R2); a palette result can be saved
+  as a smart album in one step.
+- **Culling mode.** Bursts / near-duplicates (pHash stacks, §5) open in a
+  side-by-side compare view; marking a *pick* and pressing *finalize*
+  trashes every other member of the group in one `Trashed` batch. Marking
+  is instant and local; deletion is the 30-day trash, so it is always
+  reversible. Goal: 2,000 → 300 photos in half an hour, which is what
+  directly lowers the owner's storage bill.
+- **Activity log.** A collapsible feed of what the core is doing (uploads,
+  sync, indexing, scrub results) rendered straight from actor state. Makes
+  background work visible and is the first place to look when something
+  looks stuck.
+- **Memories / rewind**: "on this day" and "jump to date" are pure queries
+  over the local index.
 
 ---
 
@@ -460,13 +648,13 @@ Estimates are Devin sessions, assuming PR-per-phase and review in between.
 | Phase | Scope | Sessions |
 |-------|-------|----------|
 | 0 (this PR) | Architecture, monorepo scaffold, Rust core with state machine runtime + `UploadJob`, server + storage node skeletons, Expo app skeleton, CI | 1 |
-| 1 | Accounts, keys, device pairing; `builtin:library` feed; camera roll scan; encrypted upload to a LocalDisk storage node; timeline UI | 2 |
-| 2 | Albums, sharing (sealed AK), roles, upload grants (owner pays), nested albums, key rotation on member removal | 2 |
-| 3 | Storage node hardening: S3 backend, pairing flow, Tailscale address selection, relay; optimize-storage evictor | 1–2 |
-| 4 | Video (chunked streaming decrypt, thumbnails), Live Photos | 1 |
-| 5 | On-device ML: faces + people, CLIP search, perceptual hashes; smart albums + materializer, built-in `Duplicates` album | 2 |
-| 6 | Importers (iCloud export folder, Google Takeout), export/backup | 1 |
-| 7 | Hosted: billing module, quotas, ops (metrics, backups), app store builds | 1–2 |
+| 1 | Accounts, keys, recovery key, device pairing; `builtin:library` feed; camera roll scan with selective backup; iOS/Android background upload to a LocalDisk storage node (P2, the make-or-break item); capture-date resolution (§5.3); timeline UI with prefetch window, favorites, trash, memories/rewind, Backup status screen | 2–3 |
+| 2 | Albums, sharing (sealed AK), roles + contributor permissions, upload grants (owner pays), nested albums, key rotation on member removal; family library auto-upload rule; notifications; share/collect links; archive/hidden; metadata editing + bulk date fix; comments/reactions | 2–3 |
+| 3 | Storage node hardening: S3 + Mirror backends, pairing flow, Tailscale address selection, relay; integrity scrub; optimize-storage evictor with 2-location rule; headless device mode with `import --watch` and `export` | 2 |
+| 4 | Video (chunked streaming decrypt, thumbnails, preview transcode on device), Live Photos / motion photos, RAW+JPEG pairing, renditions (crop/rotate) | 1–2 |
+| 5 | On-device ML (charging/unmetered scheduling): faces + people with feedback loop, CLIP search, perceptual hashes; smart albums + materializer, built-in `Duplicates` album, stacks, culling mode, command palette; map with on-device geocoding; OCR (stretch) | 2–3 |
+| 6 | Importers (iCloud export folder, Google Takeout, generic folder) with `ImportLog`; incremental export with sidecars (web, mobile, node CLI) | 1 |
+| 7 | Hosted: billing module, quotas, family plans, ops (metrics, backups), optional OIDC for self-hosters, app store builds | 1–2 |
 
 External waits not counted: Apple developer account / App Store review,
 Play Console, Stripe account, domains.
@@ -477,21 +665,36 @@ Play Console, Stripe account, domains.
 
 1. **`react-strict-dom` maturity.** Mitigation in §3; `packages/ui` is the
    only place that imports it.
-2. **iOS background execution budget.** Encryption before upload means we
-   cannot hand the raw file to `URLSession` directly. Mitigation: encrypt
-   in a `BGProcessingTask`, upload the ciphertext with background
-   `URLSession`; also encrypt+upload opportunistically while foregrounded.
+2. **iOS background execution budget.** This is the #1 reason people
+   abandon Immich-class apps and it is harder for us because we encrypt
+   before upload, so we cannot hand the raw file to `URLSession` directly.
+   Mitigation: encrypt in a `BGProcessingTask` to a temp file, upload the
+   ciphertext with background `URLSession` (survives suspension), resume per
+   chunk from the persisted `UploadJob`; encrypt+upload opportunistically
+   while foregrounded; large first imports are pointed at the headless
+   device / web importer instead of the phone. Measured, not assumed:
+   phase 1 ships with a 20k-asset background-backup soak test on a real
+   device.
 3. **Smart albums need an online owner device** to materialize new matches
-   for members. Acceptable for v1 (same as iCloud Shared Albums requiring
-   the sharer's device); document it. Long-term option: a user-run
-   "headless device" mode in the storage node binary.
+   for members. Mitigated by headless device mode in the storage node
+   (§8); with only phones it behaves like iCloud Shared Albums (sharer's
+   device must come online) and the UI says so.
 4. **Web ML cost.** Ship text-side CLIP search on web first; image indexing
    on web is optional/opt-in.
 5. **Member removal cannot revoke already-downloaded content.** Inherent to
    E2EE; the UI must say so.
 6. **Metadata leak to the coordinator** (sizes, timing, social graph). Same
    as comparable E2EE products; documented in the threat model.
-7. Open: name, domain, whether the storage node should embed `tsnet` in v1
+7. **Lost passphrase = lost library.** Inherent to E2EE (Ente has the same
+   complaint). Mitigation: recovery key shown and verified at onboarding,
+   optional printable kit, multi-device approval so a second device is a
+   recovery path, and periodic "do you still have your recovery key?"
+   check.
+8. **On-device face recognition quality** is ours to solve; there is no
+   server fallback. Mitigation: feedback loop (§9), opt-in, run on the
+   headless device for self-hosters, evaluate models on diverse face sets
+   before shipping.
+9. Open: name, domain, whether the storage node should embed `tsnet` in v1
    (currently no), whether people/face *labels* are shareable (currently no).
 
 ---
@@ -513,8 +716,8 @@ photos/
 │   ├── core-uniffi/          UniFFI surface for mobile
 │   ├── core-wasm/            wasm-bindgen surface for web
 │   ├── protocol/             wire types shared by clients, coordinator and storage node
-│   ├── server/               coordinator (axum + Postgres)
-│   └── storage-node/         blob store binary
+│   ├── server/               coordinator (axum + sqlx; SQLite default, Postgres feature)
+│   └── storage-node/         blob store binary (+ headless device mode)
 ├── docs/
 ├── .github/workflows/
 ├── Cargo.toml                Rust workspace
